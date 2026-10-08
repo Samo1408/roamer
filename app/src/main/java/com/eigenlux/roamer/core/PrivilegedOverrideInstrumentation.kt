@@ -44,10 +44,18 @@ class PrivilegedOverrideInstrumentation : Instrumentation() {
         var error: Throwable? = null
         try {
             val action = arguments.getString("action")?.takeIf { it.isNotBlank() } ?: "set"
+            val ctx = waitForTargetContext()
+            if (action == "device") {
+                waitForShizukuBinder()
+                withShellPermissionIdentity { applyDevice(arguments, log) }
+                result.putBoolean("result", true)
+                result.putString("stream", log.toString())
+                finish(0, result)
+                return
+            }
             val subIds = resolveSubIds(arguments)
             require(subIds.isNotEmpty()) { "cannot resolve subId" }
 
-            val ctx = waitForTargetContext()
             waitForShizukuBinder()
             val mgr = ctx.getSystemService(Context.CARRIER_CONFIG_SERVICE) as CarrierConfigManager
             log.append("action=$action subIds=${subIds.joinToString(",")}\n")
@@ -82,6 +90,66 @@ class PrivilegedOverrideInstrumentation : Instrumentation() {
         Log.i(TAG, log.toString())
         result.putString("stream", log.toString())
         finish(if (error == null) 0 else 1, result)
+    }
+
+    private fun applyDevice(arguments: Bundle, log: StringBuilder) {
+        val buildFields = mapOf(
+            "ro.product.manufacturer" to "MANUFACTURER",
+            "ro.product.brand" to "BRAND",
+            "ro.product.model" to "MODEL",
+            "ro.product.device" to "DEVICE",
+            "ro.product.name" to "PRODUCT",
+            "ro.product.board" to "BOARD",
+            "ro.hardware" to "HARDWARE",
+            "ro.build.id" to "ID",
+            "ro.build.display.id" to "DISPLAY",
+            "ro.bootloader" to "BOOTLOADER",
+            "ro.build.fingerprint" to "FINGERPRINT",
+            "ro.product.serialno" to "SERIAL",
+            "ro.soc.manufacturer" to "SOC_MANUFACTURER",
+            "ro.soc.model" to "SOC_MODEL",
+            "ro.build.type" to "TYPE",
+            "ro.build.tags" to "TAGS",
+            "ro.build.user" to "USER",
+            "ro.build.host" to "HOST",
+            "ro.build.version.release" to "VERSION.RELEASE",
+            "ro.build.version.incremental" to "VERSION.INCREMENTAL",
+            "ro.build.version.security_patch" to "VERSION.SECURITY_PATCH",
+    )
+        var changed = 0
+        for (i in 0 until 27) {
+            val key = arguments.getString("device.$i.key") ?: continue
+            val enabled = arguments.getString("device.$i.enabled") == "true"
+            val value = arguments.getString("device.$i.value").orEmpty()
+            if (!enabled || value.isBlank()) continue
+            val field = buildFields[key]
+            if (field != null) {
+                setBuildField(field, value)
+                changed++
+            }
+            setSystemProperty(key, value)
+        }
+        log.append("DEVICE dispatched: $changed Build fields / 27 properties; scope=instrumented process + system properties\n")
+        log.append("NOTE: this is the same PrivilegedOverrideInstrumentation path as SIM; it does not create an LSPosed/Xposed hook.\n")
+    }
+
+    private fun setBuildField(fieldName: String, value: String) {
+        runCatching {
+            val target = if (fieldName.startsWith("VERSION.")) Class.forName("android.os.Build\$VERSION") else Class.forName("android.os.Build")
+            val name = if (fieldName.startsWith("VERSION.")) fieldName.removePrefix("VERSION.") else fieldName
+            val field = target.getDeclaredField(name)
+            field.isAccessible = true
+            field.set(null, value)
+        }.onFailure { Log.w(TAG, "Build field $fieldName unavailable: ${it.message}") }
+    }
+
+    private fun setSystemProperty(key: String, value: String) {
+        runCatching {
+            val cls = Class.forName("android.os.SystemProperties")
+            val m = cls.getDeclaredMethod("set", String::class.java, String::class.java)
+            m.isAccessible = true
+            m.invoke(null, key, value)
+        }.onFailure { Log.w(TAG, "SystemProperties.set($key) failed: ${it.message}") }
     }
 
     private fun applyAction(
