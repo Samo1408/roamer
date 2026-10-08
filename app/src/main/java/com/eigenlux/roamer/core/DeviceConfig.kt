@@ -3,8 +3,6 @@ package com.eigenlux.roamer.core
 import android.content.Context
 
 /** Persistent Device profile. Kept completely separate from SIM settings. */
-data class DeviceProperty(val key: String, val defaultValue: String, val enabled: Boolean = true, val value: String = defaultValue)
-
 object DeviceConfig {
     private const val PREFS = "device_profile"
     private const val SEP = "\u0001"
