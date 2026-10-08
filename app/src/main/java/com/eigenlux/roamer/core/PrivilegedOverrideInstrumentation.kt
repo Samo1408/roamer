@@ -44,11 +44,10 @@ class PrivilegedOverrideInstrumentation : Instrumentation() {
         var error: Throwable? = null
         try {
             val action = arguments.getString("action")?.takeIf { it.isNotBlank() } ?: "set"
-            val ctx = waitForTargetContext()
             if (action == "device") {
-                waitForShizukuBinder()
-                withShellPermissionIdentity { applyDevice(arguments, log) }
+                applyDevice(arguments, log)
                 result.putBoolean("result", true)
+                Log.i(TAG, log.toString())
                 result.putString("stream", log.toString())
                 finish(0, result)
                 return
@@ -56,6 +55,7 @@ class PrivilegedOverrideInstrumentation : Instrumentation() {
             val subIds = resolveSubIds(arguments)
             require(subIds.isNotEmpty()) { "cannot resolve subId" }
 
+            val ctx = waitForTargetContext()
             waitForShizukuBinder()
             val mgr = ctx.getSystemService(Context.CARRIER_CONFIG_SERVICE) as CarrierConfigManager
             log.append("action=$action subIds=${subIds.joinToString(",")}\n")
@@ -93,63 +93,37 @@ class PrivilegedOverrideInstrumentation : Instrumentation() {
     }
 
     private fun applyDevice(arguments: Bundle, log: StringBuilder) {
-        val buildFields = mapOf(
-            "ro.product.manufacturer" to "MANUFACTURER",
-            "ro.product.brand" to "BRAND",
-            "ro.product.model" to "MODEL",
-            "ro.product.device" to "DEVICE",
-            "ro.product.name" to "PRODUCT",
-            "ro.product.board" to "BOARD",
-            "ro.hardware" to "HARDWARE",
-            "ro.build.id" to "ID",
-            "ro.build.display.id" to "DISPLAY",
-            "ro.bootloader" to "BOOTLOADER",
-            "ro.build.fingerprint" to "FINGERPRINT",
-            "ro.product.serialno" to "SERIAL",
-            "ro.soc.manufacturer" to "SOC_MANUFACTURER",
-            "ro.soc.model" to "SOC_MODEL",
-            "ro.build.type" to "TYPE",
-            "ro.build.tags" to "TAGS",
-            "ro.build.user" to "USER",
-            "ro.build.host" to "HOST",
-            "ro.build.version.release" to "VERSION.RELEASE",
-            "ro.build.version.incremental" to "VERSION.INCREMENTAL",
-            "ro.build.version.security_patch" to "VERSION.SECURITY_PATCH",
-    )
+        log.append("DEVICE instrumentation target=${arguments.getString("targetPackage").orEmpty()}\n")
+        val ctx = waitForTargetContext()
+        val pairs = arguments.keySet().filter { it.startsWith("device.") }.associateWith { arguments.getString(it).orEmpty() }
         var changed = 0
-        for (i in 0 until 27) {
-            val key = arguments.getString("device.$i.key") ?: continue
-            val enabled = arguments.getString("device.$i.enabled") == "true"
-            val value = arguments.getString("device.$i.value").orEmpty()
-            if (!enabled || value.isBlank()) continue
-            val field = buildFields[key]
-            if (field != null) {
-                setBuildField(field, value)
-                changed++
-            }
-            setSystemProperty(key, value)
+        for ((key, value) in pairs) {
+            val prop = key.removePrefix("device.")
+            if (value.isBlank()) continue
+            runCatching { patchBuildField(prop, value) }.onFailure { log.append("Build $prop failed: ${it.message}\n") }.onSuccess { if (it) changed++ }
         }
-        log.append("DEVICE dispatched: $changed Build fields / 27 properties; scope=instrumented process + system properties\n")
-        log.append("NOTE: this is the same PrivilegedOverrideInstrumentation path as SIM; it does not create an LSPosed/Xposed hook.\n")
+        log.append("DEVICE Build fields changed=$changed process=${android.os.Process.myPid()} package=${ctx.packageName}\n")
     }
 
-    private fun setBuildField(fieldName: String, value: String) {
-        runCatching {
-            val target = if (fieldName.startsWith("VERSION.")) Class.forName("android.os.Build\$VERSION") else Class.forName("android.os.Build")
-            val name = if (fieldName.startsWith("VERSION.")) fieldName.removePrefix("VERSION.") else fieldName
-            val field = target.getDeclaredField(name)
-            field.isAccessible = true
-            field.set(null, value)
-        }.onFailure { Log.w(TAG, "Build field $fieldName unavailable: ${it.message}") }
-    }
-
-    private fun setSystemProperty(key: String, value: String) {
-        runCatching {
-            val cls = Class.forName("android.os.SystemProperties")
-            val m = cls.getDeclaredMethod("set", String::class.java, String::class.java)
-            m.isAccessible = true
-            m.invoke(null, key, value)
-        }.onFailure { Log.w(TAG, "SystemProperties.set($key) failed: ${it.message}") }
+    private fun patchBuildField(prop: String, value: String): Boolean {
+        val map = mapOf(
+            "ro.product.manufacturer" to "MANUFACTURER", "ro.product.brand" to "BRAND", "ro.product.model" to "MODEL",
+            "ro.product.device" to "DEVICE", "ro.product.name" to "PRODUCT", "ro.product.board" to "BOARD",
+            "ro.hardware" to "HARDWARE", "ro.bootloader" to "BOOTLOADER", "ro.build.id" to "ID",
+            "ro.build.display.id" to "DISPLAY", "ro.build.fingerprint" to "FINGERPRINT", "ro.build.type" to "TYPE",
+            "ro.build.tags" to "TAGS", "ro.build.user" to "USER", "ro.build.host" to "HOST",
+            "ro.build.version.release" to "VERSION.RELEASE", "ro.build.version.incremental" to "VERSION.INCREMENTAL",
+            "ro.build.version.security_patch" to "VERSION.SECURITY_PATCH", "ro.soc.manufacturer" to "SOC_MANUFACTURER",
+            "ro.soc.model" to "SOC_MODEL"
+        )
+        val path = map[prop] ?: return false
+        val dot = path.indexOf('.')
+        val clazz = if (dot < 0) Class.forName("android.os.Build") else Class.forName("android.os.Build\$${path.substring(0, dot)}")
+        val name = if (dot < 0) path else path.substring(dot + 1)
+        val f = clazz.getDeclaredField(name)
+        f.isAccessible = true
+        runCatching { f.set(null, value) }.getOrElse { return false }
+        return true
     }
 
     private fun applyAction(
