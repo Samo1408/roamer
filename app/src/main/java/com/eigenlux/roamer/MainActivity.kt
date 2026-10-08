@@ -90,6 +90,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.eigenlux.roamer.core.CarrierConfigController
+import com.eigenlux.roamer.core.DeviceConfigController
+import com.eigenlux.roamer.core.DeviceProperties
+import com.eigenlux.roamer.core.DeviceProperty
 import com.eigenlux.roamer.core.LocaleOverrideController
 import com.eigenlux.roamer.core.RegionLogic
 import com.eigenlux.roamer.core.ShizukuManager
@@ -152,6 +155,7 @@ class MainActivity : ComponentActivity() {
 
 private enum class LogLevel { INFO, SUCCESS, ERROR, WARNING }
 private data class LogState(val level: LogLevel, val message: String)
+private enum class MainPage { SIM, DEVICE }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -173,6 +177,8 @@ private fun RoamerApp(
     var regionMasterOn by remember { mutableStateOf(AppLocaleStore.isMasterOn(ctx)) }
     var showAppPicker by remember { mutableStateOf(false) }
     var shizukuAlive by remember { mutableStateOf(ShizukuManager.isBinderAlive()) }
+    var page by remember { mutableStateOf(MainPage.SIM) }
+    var deviceProps by remember { mutableStateOf(DeviceConfigController.load(ctx)) }
 
     fun refreshShizuku() {
         shizukuAlive = ShizukuManager.isBinderAlive()
@@ -288,7 +294,36 @@ private fun RoamerApp(
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             if (busy || refreshing) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            Column(
+            SingleChoiceSegmentedButtonRow(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.lg, vertical = Spacing.sm),
+            ) {
+                SegmentedButton(
+                    selected = page == MainPage.SIM,
+                    onClick = { page = MainPage.SIM },
+                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                ) { Text("Sim") }
+                SegmentedButton(
+                    selected = page == MainPage.DEVICE,
+                    onClick = { page = MainPage.DEVICE; deviceProps = DeviceConfigController.load(ctx) },
+                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                ) { Text("Device") }
+            }
+            if (page == MainPage.DEVICE) {
+                DeviceEditor(
+                    properties = deviceProps,
+                    enabled = shizukuGranted && !busy,
+                    onChange = { deviceProps = it },
+                    onSave = {
+                        busy = true
+                        scope.launch {
+                            val r = withContext(Dispatchers.IO) { DeviceConfigController.save(ctx, deviceProps) }
+                            log = LogState(if (r.ok) LogLevel.SUCCESS else LogLevel.ERROR, r.output)
+                            busy = false
+                        }
+                    },
+                    onCancel = { deviceProps = DeviceConfigController.cancel(ctx) },
+                )
+            } else Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
@@ -472,6 +507,61 @@ private fun RoamerApp(
         }
     }
 }
+
+@Composable
+private fun DeviceEditor(
+    properties: List<DeviceProperty>,
+    enabled: Boolean,
+    onChange: (List<DeviceProperty>) -> Unit,
+    onSave: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(Spacing.lg),
+        verticalArrangement = Arrangement.spacedBy(Spacing.sm),
+    ) {
+        Text("Device", style = MaterialTheme.typography.headlineSmall)
+        Text(
+            "Build properties — same PrivilegedOverrideInstrumentation path as Sim.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        properties.forEachIndexed { index, property ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(Spacing.sm),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+                ) {
+                    Switch(
+                        checked = property.enabled,
+                        enabled = enabled,
+                        onCheckedChange = { onChange(properties.toMutableList().also { list -> list[index] = property.copy(enabled = it) }) },
+                    )
+                    OutlinedTextField(
+                        value = property.value,
+                        onValueChange = { onChange(properties.toMutableList().also { list -> list[index] = property.copy(value = it) }) },
+                        enabled = enabled,
+                        label = { Text(property.key) },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+        ) {
+            OutlinedButton(onClick = onCancel, enabled = true, modifier = Modifier.weight(1f)) { Text("Cancel") }
+            Button(onClick = onSave, enabled = enabled, modifier = Modifier.weight(1f)) { Text("Save Device") }
+        }
+    }
+}
+
 
 @Composable
 private fun InfoSummaryBlock(
